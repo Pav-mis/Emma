@@ -9,6 +9,95 @@ struct GFF
     attributes::String
 end
 
+function FMcoords2GFF(strand::Char, start::Integer, length::Integer, glength::Integer)
+    gffstart = strand == '+' ? start : mod1(reverse_complement(start + length - 1, glength), glength)
+    gffend = strand == '+' ? start + length - 1 : reverse_complement(start, glength)
+    if gffend < gffstart; gffend += glength; end
+    gffstart, gffend
+end
+
+function FMcoords2GFF(fm::FeatureMatch, glength::Integer)
+    FMcoords2GFF(fm.strand, fm.target_from, fm.target_length, glength::Integer)
+end
+
+function CDS2GFF(cds::FeatureMatch, genome::CircularSequence, rev_genome::CircularSequence, trns::Vector{tRNA})
+    glength = length(genome)
+    attributes = "Name=" * cds.query
+    cdsstart = cds.target_from
+    cdsstop = cds.target_from + cds.target_length - 1 + 3
+    trnidx = findfirst(t->circularin(t.fm.target_from, cdsstop-2, 3, glength), trns)
+    if !isnothing(trnidx)
+        stopcodon = cds.strand == '+' ? copy(genome[cdsstop-2:cdsstop-2+circulardistance(cdsstop-2, trns[trnidx].fm.target_from, glength)-1]) : copy(rev_genome[cdsstop-2:cdsstop-2+circulardistance(cdsstop-2, trns[trnidx].fm.target_from, glength)-1])
+        cdsstop = trns[trnidx].fm.target_from - 1
+        while length(stopcodon) < 3
+            push!(stopcodon, DNA_A)
+        end
+        attributes *= ";Note=putative $stopcodon stop codon is completed by the addition of 3' A residues to the mRNA"
+    end
+    gffstart, gffend = FMcoords2GFF(cds.strand, cdsstart, circulardistance(cdsstart, cdsstop+1, glength), glength)
+    return GFF("Emma", "CDS", string(gffstart), string(gffend), string(cds.evalue), cds.strand, "0", attributes)
+end
+
+function tRNA2GFF(trn::tRNA, glength::Integer)
+    gffstart, gffend = FMcoords2GFF(trn.fm, glength)
+    attributes = "Name=" * trn.fm.query * "-" * trn.anticodon
+    if trn.polyA > 0
+        attributes *= ";Note=tRNA completed by post-transcriptional addition of " * string(trn.polyA)
+        attributes *= trn.polyA > 1 ? " As" : " A"
+    end
+    if typeof(attributes) != Missing
+        return GFF("Emma", "tRNA", string(gffstart), string(gffend), string(trn.fm.evalue), trn.fm.strand, ".", attributes)
+    else 
+        return nothing
+    end
+end
+
+function rRNA2GFF(rrn::FeatureMatch, glength::Integer)
+    gffstart, gffend = FMcoords2GFF(rrn, glength)
+    attributes = "Name=" * rrn.query
+    return GFF("Emma", "rRNA", string(gffstart), string(gffend), string(rrn.evalue), rrn.strand, ".", attributes)
+end
+
+function writeGFF(outfile::String, id::AbstractString, genome::CircularSequence, rev_genome::CircularSequence, cds_matches::Vector{FeatureMatch},
+             trn_matches::Vector{tRNA}, rRNAs::Vector{FeatureMatch})
+
+    gffs = GFF[]
+    genome_length = length(genome)
+
+    function writeone(out::IO, gff::Union{Nothing, GFF})
+        if typeof(gff) != Nothing
+            write(out, join([id, gff.source, gff.ftype,gff.fstart,gff.fend,gff.score,gff.strand,gff.phase,gff.attributes], "\t"), "\n")
+            push!(gffs, gff)
+        end
+    end
+
+    open(outfile, "w") do out
+        for cds in cds_matches
+            gff = CDS2GFF(cds, genome, rev_genome, trn_matches)
+            writeone(out, gff)
+        end
+        for trn in trn_matches
+            gff = tRNA2GFF(trn, genome_length)
+            writeone(out, gff)
+        end
+        for rrn in rRNAs
+            gff = rRNA2GFF(rrn, genome_length)
+            writeone(out, gff)
+        end
+    end
+    return gffs
+end
+struct GFF
+    source::String
+    ftype::String
+    fstart::String
+    fend::String
+    score::String
+    strand::Char
+    phase::String
+    attributes::String
+end
+
 function HMMmatch2GFF(cds::HMMmatch, genome_length::Integer)
     cdsstart = cds.ali_from
     cdsstop = cds.ali_to + 2
