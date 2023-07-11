@@ -1,161 +1,172 @@
+using Serialization
+using Artifacts
+using BioSequences
+using FASTX
+using XGBoost
+using Logging
+using Unicode
+
+const emmamodels = "/home/pavel/Emma/emma_vertebrate_models"
+
 include("circularity.jl")
+include("feature.jl")
 include("orfs.jl")
 include("tRNAs.jl")
 include("rRNAs.jl")
 include("gff.jl")
 include("visuals.jl")
 
-using XGBoost
-
 const minORF = 150
 
-function get_overlapped_trns(trns::Vector{CMAlignment_trn}, glength::Integer)
-    overlapped = Vector{Tuple{CMAlignment_trn, Int}}(undef, 0)
-    for i in 1:length(trns)-1
-        if trns[i].tto >= trns[i+1].tfrom
-            push!(overlapped, (trns[i], trns[i+1].tfrom - 1))
-        end
-    end
-    if last(trns).tto >= glength + first(trns).tfrom
-        push!(overlapped, (last(trns), glength + first(trns).tfrom - 1))
-    end
-    return overlapped
-end
-
-function get_best_trns(vector)
-    trns = CMAlignment_trn[]
-    for f in 1:length(vector)
-        trn = []
-        push!(trn, vector[f])
-        for i in 1:length(vector)
-            if abs(vector[f].tfrom - vector[i].tfrom) <= 5
-                push!(trn, vector[i])
+function remove_starts_in_tRNAs!(starts, codons, tRNAs, glength)
+    fms = getproperty.(tRNAs, :fm)
+    for (startvector, codonvector) in zip(starts, codons)
+        startsintRNA = []
+        for (i,s) in enumerate(startvector)
+            if any(circularin.(s, fms, glength))
+                push!(startsintRNA, i)
             end
         end
-        sort!(trn, by=x->x.Evalue)
-        println(trn[1])
-        best = first(trn)
-        push!(trns, best)
+        deleteat!(startvector, startsintRNA)
     end
-    return trns
-end          
+end
 
+function add_stops_at_tRNAs!(stops, tRNAs, glength)
+    for t in tRNAs
+        push!(stops[mod1(t.fm.target_from, 3)], t.fm.target_from)
+        minus1 = mod1(t.fm.target_from-1, glength)
+        push!(stops[mod1(minus1, 3)], minus1)
+        minus2 = mod1(t.fm.target_from-2, glength)
+        push!(stops[mod1(minus2, 3)], minus2)
+    end
+    sort!(stops[1])
+    sort!(stops[2])
+    sort!(stops[3])
+    return stops
+end
 
-function main(infile::String, outfile::String, svgfile::String)
+function main(infile::String, outfile::String; svgfile="", loglevel="Info")
+
+    global_logger(ConsoleLogger(loglevel == "debug" ? Logging.Debug : Logging.Info))
+
+    @info "$infile"
     target = FASTA.Record()
     reader = open(FASTA.Reader, infile)
     read!(reader, target)
     id = FASTA.identifier(target)
     genome = CircularSequence(FASTA.sequence(LongDNA{4}, target))
+    glength = length(genome)
     rev_genome = reverse_complement(genome)
-    #println(id, "\t", length(genome))
+    @info "$id\t$glength bp"
 
     #extend genome
-    extended_genome = genome[1:length(genome)+100]
+    extended_genome = genome[1:glength+100]
     writer = open(FASTA.Writer, "tmp.extended.fa")
     write(writer, FASTA.Record(id, extended_genome))
     close(writer)
 
     #find tRNAs
-    trn_matches = parse_trn_alignments(cmsearch("trn", "all_trn.cm"), length(genome))
-    #filter!(x -> isequal(x.query, get(anticodon2trn, x.anticodon, "")), trn_matches)
-    filter!(x -> x.Evalue < 1e-4, trn_matches)
-    filter!(x -> x.tfrom <= length(genome), trn_matches)
+    trn_matches = parse_trn_alignments(cmsearch("trn", "all_trn.cm"), glength)
+    @debug trn_matches
+    filter!(x -> x.fm.evalue < 1e-5, trn_matches)
+    filter!(x -> x.fm.target_from <= glength, trn_matches)
+    ftrns = get_best_trns(filter(x->x.fm.strand=='+',trn_matches), glength)
+    rtrns = get_best_trns(filter(x->x.fm.strand=='-',trn_matches), glength)
     #check for overlapping tRNAs
-    overlapped = get_overlapped_trns(sort(filter(x -> x.tstrand == '+', trn_matches), by=x->x.tfrom), length(genome))
-    append!(overlapped, get_overlapped_trns(sort(filter(x -> x.tstrand == '-', trn_matches), by=x->x.tfrom), length(genome)))
-    #println(overlapped)
+    overlapped = get_overlapped_trns(sort(ftrns, by=x->x.fm.target_from), glength)
+    append!(overlapped, get_overlapped_trns(sort(rtrns, by=x->x.fm.target_from), glength))
+    trn_matches = append!(ftrns, rtrns)
     #for overlapped tRNAs, generate polyadenylated version
     for (cma, trunc_end) in overlapped
-        trnseq = cma.tstrand == '+' ? genome.sequence[cma.tfrom:trunc_end] : rev_genome.sequence[cma.tfrom:trunc_end]
+        trnseq = cma.fm.strand == '+' ? genome.sequence[cma.fm.target_from:trunc_end] : rev_genome.sequence[cma.fm.target_from:trunc_end]
         trnseq_polyA = trnseq * dna"AAAAAAAAAA"
-        polyA_matches = parse_trn_alignments(cmsearch(cma.query, "trn", trnseq_polyA), 0)
+        polyA_matches = parse_trn_alignments(cmsearch(cma.fm.query, "trn", trnseq_polyA), 0)
         isempty(polyA_matches) && continue
         trn_match = polyA_matches[1]
-        if trn_match.Evalue < cma.Evalue
-            #construct modified CMA with new Evalue, new end point, polyA flag
-            newcma = CMAlignment_trn(cma.query, cma.target, trn_match.Evalue,
-            trn_match.qfrom, trn_match.qto, cma.tfrom, trunc_end, cma.tstrand,
-            trn_match.tseq, trn_match.anticodon, (trn_match.tto - trn_match.tfrom) - (trunc_end - cma.tfrom))
+        if trn_match.fm.evalue < cma.fm.evalue
+            #construct modified CMA with new evalue, new end point, polyA length
+            newcma = tRNA(FeatureMatch(cma.fm.id, cma.fm.query, cma.fm.strand, trn_match.fm.model_from, trn_match.fm.model_to, cma.fm.target_from, 
+                circulardistance(cma.fm.target_from, trunc_end, glength) + 1, trn_match.fm.evalue),
+                trn_match.anticodon, (trn_match.fm.target_length) - (trunc_end - cma.fm.target_from))
             #delete old match from trn_matches
             deleteat!(trn_matches, findfirst(x -> x == cma, trn_matches))
             #add new CMA
             push!(trn_matches, newcma)
         end
     end
-    sort!(trn_matches, by=x->x.Evalue)
-    trn_matches = unique!(get_best_trns(trn_matches))
-
-    #println(trn_matches)
+    @debug trn_matches
+    @info "found $(length(trn_matches)) tRNA genes"
 
     #find rRNAs
-    rRNAs = (rrnL = rRNA(Vector{nHMMmatch}(undef, 0), Vector{CMAlignment_rrn}(undef, 0)),
-            rrnS = rRNA(Vector{nHMMmatch}(undef, 0), Vector{CMAlignment_rrn}(undef, 0)))
-    #search for rrn ends using cmsearch
-    rrn_matches = parse_rrn_alignments(cmsearch("rrn", "all_rrn.cm"), length(genome))
-    filter!(x -> x.tfrom <= length(genome), rrn_matches)
-    for m in rrn_matches
-        if m.query == "rrnL"
-            push!(rRNAs.rrnL.stop, m)
-        elseif m.query == "rrnS"
-            push!(rRNAs.rrnS.stop, m)
-        end
-    end
-    #search for rrn starts using hmmsearch
-    rrn_starts = parse_tbl(rrnsearch())
-    filter!(x -> x.ali_from <= length(genome), rrn_starts)
-    for m in rrn_starts
-        if m.query == "rrnL"
-            push!(rRNAs.rrnL.start, m)
-        elseif m.query == "rrnS"
-            push!(rRNAs.rrnS.start, m)
-        end
-    end
+    #search for rrns using hmmsearch
+    rrns = parse_tbl(rrnsearch(), glength)
+    @debug rrns
     #fix ends using flanking trn genes
-
-    #println(rRNAs)
+    ftRNAs = filter(x->x.fm.strand == '+', trn_matches)
+    sort!(ftRNAs, by=x->x.fm.target_from)
+    rtRNAs = filter(x->x.fm.strand == '-', trn_matches)
+    sort!(rtRNAs, by=x->x.fm.target_from)
+    fix_rrn_ends!(rrns, ftRNAs, rtRNAs, glength)
+    @debug rrns
 
     #find CDSs
     fstarts, fstartcodons = getcodons(genome, startcodon)
+    remove_starts_in_tRNAs!(fstarts, fstartcodons, ftRNAs, glength)
     fstops = codonmatches(genome, stopcodon)
+    add_stops_at_tRNAs!(fstops, ftRNAs, glength)
+    @debug fstops
+
     rstarts, rstartcodons = getcodons(rev_genome, startcodon)
+    remove_starts_in_tRNAs!(rstarts, rstartcodons, rtRNAs, glength)
     rstops = codonmatches(rev_genome, stopcodon)
-    cds_matches = parse_domt(orfsearch(id, genome, fstarts, fstops, rstarts, rstops, minORF), length(genome))
-    #rationalise HMM matches to leave one per ORF
-    #sort by ORF, HMM, genome position
-    sort!(cds_matches, by = x -> (x.orf, x.query, x.ali_from))
-    #merge adjacent matches to same HMM
-    #drop HMM matches that score lower than other overlapping matches
-    rationalised_cds_matches = HMMmatch[]
-    current_cds_match = first(cds_matches)
-    for i in 2:length(cds_matches)
-        cds_match = cds_matches[i]
-        if cds_match.orf == current_cds_match.orf
-            if cds_match.query == current_cds_match.query
-                current_cds_match = merge_hmm_matches(current_cds_match, cds_match)
-            elseif cds_match.Evalue < current_cds_match.Evalue
-                current_cds_match = cds_match
-            end
-        else
-            push!(rationalised_cds_matches, current_cds_match)
-            current_cds_match = cds_match
-        end
-    end
-    push!(rationalised_cds_matches, current_cds_match)
+    add_stops_at_tRNAs!(rstops, rtRNAs, glength)
+
+    cds_matches = parse_domt(orfsearch(id, genome, fstarts, fstops, rstarts, rstops, minORF), glength)    
+    @debug cds_matches
     #fix start & stop codons
     #load XGBoost model
-    startcodon_model = Booster(model_file=joinpath(emmamodels, "xgb.model"))
-    ftrns = filter(x->x.tstrand == '+', trn_matches)
-    rtrns = filter(x->x.tstrand == '-', trn_matches)
-    fhmms = filter(x->x.strand == '+', rationalised_cds_matches)
-    rhmms = filter(x->x.strand == '-', rationalised_cds_matches)
-    fix_start_and_stop_codons!(fhmms, ftrns, fstarts, fstartcodons, fstops, startcodon_model, length(genome))
-    fix_start_and_stop_codons!(rhmms, rtrns, rstarts, rstartcodons, rstops, startcodon_model, length(genome))
-    gffs = writeGFF(outfile, id, length(genome), append!(fhmms,rhmms), trn_matches, rRNAs)
-    drawgenome(svgfile, id, length(genome), gffs)
+    startcodon_model = Booster(DMatrix[],model_file=joinpath(emmamodels, "xgb.model"))
+    fhmms = filter(x->x.strand == '+', cds_matches)
+    rhmms = filter(x->x.strand == '-', cds_matches)
+    fix_start_and_stop_codons!(fhmms, ftRNAs, fstarts, fstartcodons, fstops, startcodon_model, glength)
+    fix_start_and_stop_codons!(rhmms, rtRNAs, rstarts, rstartcodons, rstops, startcodon_model, glength)
+
+    @info "found $(length(fhmms) + length(rhmms)) protein-coding genes"
+
+    gffs = writeGFF(outfile, id, genome, rev_genome, append!(fhmms,rhmms), trn_matches, rrns)
+    #drawgenome(svgfile, id, glength, gffs)
 end
 
-main(ARGS[1], ARGS[2], ARGS[3])
+if abspath(PROGRAM_FILE) == @__FILE__ #running as script
+    if isdir(ARGS[1]) && isdir(ARGS[2])
+        fafiles = filter!(x->endswith(x,".fa") || endswith(x,".fasta"), readdir(ARGS[1], join=true))
+        for fasta in fafiles
+            accession = first(split(basename(fasta),"."))
+            main(fasta, joinpath(ARGS[2], accession * ".gff"))
+        end
+    elseif length(ARGS) == 2
+        main(ARGS[1], ARGS[2])
+    elseif length(ARGS) == 3
+        if startswith(ARGS[3], "svgfile")
+            main(ARGS[1], ARGS[2]; svgfile=last(split(ARGS[3], "=")))
+        elseif startswith(ARGS[3], "loglevel")
+            main(ARGS[1], ARGS[2]; loglevel=last(split(ARGS[3], "=")))
+        end
+    elseif length(ARGS) == 4
+        svgfile::String
+        loglevel::String
+        if startswith(ARGS[3], "svgfile")
+            svgfile=last(split(ARGS[3], "="))
+        elseif startswith(ARGS[3], "loglevel")
+            loglevel=last(split(ARGS[3], "="))
+        end
+        if startswith(ARGS[4], "svgfile")
+            svgfile=last(split(ARGS[4], "="))
+        elseif startswith(ARGS[4], "loglevel")
+            loglevel=last(split(ARGS[4], "="))
+        end
+    end
+end
 
 #ARGS[1] = fasta input
 #ARGS[2] = gff output
