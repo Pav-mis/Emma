@@ -46,13 +46,26 @@ function drawfeature(feature::GFF, glength::Integer)
     end
     fillpath()
     name = first(split(feature.attributes, ";"))[6:end]
+    prot_name = first(split(name, "."))
     fontsize(6)
     setcolor("black")
-    textcurvecentred(name, pos2radians((start+stop)/2), fradius, gcentre; baselineshift=-2)
+
+#    textcurvecentred(name, pos2radians((start+stop)/2), fradius, gcentre; baselineshift=-2)
+    location=pos2radians((start+stop)/2)
+#   place protine and rna names are right angles to circle
+#   draw a line connecting them
+    if (prot_name == "rrnS")
+        (prot_name="12S rRNA")
+    end
+    if (prot_name == "rrnL")
+        (prot_name="16S rRNA")
+    end
+    text(prot_name, Point((fradius+20)*cos(location), (fradius+20)sin(location)), angle=location)
+    line(Point((fradius+5)*cos(location), (fradius+5)*sin(location)), Point((fradius+18)*cos(location), (fradius+18)sin(location)), :stroke)
 end
 
-function drawgenome(svgfile::String, id::String, glength::Integer, gffs::Vector{GFF})
-    Drawing(500,500,svgfile)
+function drawgenome(svgfile::String, id::AbstractString, glength::Integer, gffs::Vector{GFF})
+    Drawing(600,600,svgfile)
     origin()
     background("white")
     setline(0.5)
@@ -67,5 +80,27 @@ function drawgenome(svgfile::String, id::String, glength::Integer, gffs::Vector{
     for gff in gffs
         drawfeature(gff, glength)
     end
+
+    #draw circular bp map for full length of genome
+    _counter() = (a = -1; () -> a += 1)
+    counter = _counter()
+        fontsize(6)
+        arrow(O +  (0, 0), 140, 0, 2π,
+            arrowheadlength=0,
+            decoration=range(0, 1, length=glength),
+            decorate = () -> begin
+                    d = counter()
+                    if d % 1000 == 0
+                        text(string(d), O + (0, -20), halign=:center)
+                        setline(0.6)
+                        line(O - (0, 10), O + (0, 0), action = :stroke)
+                    end
+                    if d % 200 == 0
+                        setline(0.4)
+                        line(O - (0, 3), O + (0, 0), action = :stroke)
+                    end
+                 end
+            )
+
     finish()
 end
