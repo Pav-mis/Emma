@@ -6,7 +6,7 @@ using XGBoost
 using Logging
 using Unicode
 
-const emmamodels = "/home/pavel/Emma/emma_vertebrate_models"
+const emmamodels = "Emma/emma_vertebrate_models"
 
 include("circularity.jl")
 include("feature.jl")
