@@ -5,8 +5,11 @@ using FASTX
 using XGBoost
 using Logging
 using Unicode
+using GenomicAnnotations
+using ArgMacros
 
-const emmamodels = "Emma/emma_vertebrate_models"
+#const emmamodels = "/data/Emma/emma_vertebrate_models"
+const emmamodels = joinpath(artifact"Emma_vertebrate_models", "Emma_vertebrate_models-1.1")
 
 include("circularity.jl")
 include("feature.jl")
@@ -14,9 +17,12 @@ include("orfs.jl")
 include("tRNAs.jl")
 include("rRNAs.jl")
 include("gff.jl")
+include("gb.jl")
 include("visuals.jl")
+include("gb.jl")
 
 const minORF = 150
+
 
 function remove_starts_in_tRNAs!(starts, codons, tRNAs, glength)
     fms = getproperty.(tRNAs, :fm)
@@ -45,7 +51,53 @@ function add_stops_at_tRNAs!(stops, tRNAs, glength)
     return stops
 end
 
-function main(infile::String, outfile::String; svgfile="", loglevel="Info")
+#If duplicate features exist, remove the ones with higher e-values
+function remove_duplicate_features(matches::Vector)
+    features = FeatureMatch[]
+    sorted_array = sort(matches, by = x -> x.evalue)
+    filtered_dict = Dict()
+    for item in sorted_array
+        if !haskey(filtered_dict, item.query)
+            filtered_dict[item.query] = item
+        end
+    end
+    filtered_array = collect(values(filtered_dict))
+    for feature in filtered_array
+        push!(features, feature)
+    end
+    return features
+end
+
+function trnF_start(GFFs, genome, glength)
+    trnF_idx = findfirst(x -> occursin(r"trnF", x.attributes), GFFs)
+    if trnF_idx != nothing
+        trnF = GFFs[trnF_idx]
+        offset = parse(Int32, trnF.fstart) - 1
+        for gff in GFFs
+            fstart = parse(Int32, gff.fstart)
+            fend = parse(Int32, gff.fend)
+            fstart -= offset
+            if fstart < 1; fstart += glength; end
+            fend -= offset
+            if fend < 1; fend += glength; end
+            gff.fstart = string(fstart)
+            gff.fend = string(fend)
+        end
+        if offset > 1
+            genome = LongDNA{4}(string(genome[offset+1:glength]) * string(genome[1:offset]))
+        else
+            genome = LongDNA{4}(string(genome[1:glength]))
+        end
+        return GFFs, genome
+    else
+        @warn "Positional translation not possible due to missing trnF"
+        return GFFs, genome
+    end
+end
+        
+
+
+function main(infile::String; outfile_gff="", outfile_gb="", outfile_fa="", svgfile="", loglevel="Info")
 
     global_logger(ConsoleLogger(loglevel == "debug" ? Logging.Debug : Logging.Info))
 
@@ -94,12 +146,14 @@ function main(infile::String, outfile::String; svgfile="", loglevel="Info")
             push!(trn_matches, newcma)
         end
     end
+
     @debug trn_matches
     @info "found $(length(trn_matches)) tRNA genes"
 
     #find rRNAs
     #search for rrns using hmmsearch
     rrns = parse_tbl(rrnsearch(), glength)
+    filter!(x -> x.evalue < 1e-10, rrns)
     @debug rrns
     #fix ends using flanking trn genes
     ftRNAs = filter(x->x.fm.strand == '+', trn_matches)
@@ -121,7 +175,7 @@ function main(infile::String, outfile::String; svgfile="", loglevel="Info")
     rstops = codonmatches(rev_genome, stopcodon)
     add_stops_at_tRNAs!(rstops, rtRNAs, glength)
 
-    cds_matches = parse_domt(orfsearch(id, genome, fstarts, fstops, rstarts, rstops, minORF), glength)    
+    cds_matches = parse_domt(orfsearch(id, genome, fstarts, fstops, rstarts, rstops, minORF), glength)
     @debug cds_matches
     #fix start & stop codons
     #load XGBoost model
@@ -131,42 +185,73 @@ function main(infile::String, outfile::String; svgfile="", loglevel="Info")
     fix_start_and_stop_codons!(fhmms, ftRNAs, fstarts, fstartcodons, fstops, startcodon_model, glength)
     fix_start_and_stop_codons!(rhmms, rtRNAs, rstarts, rstartcodons, rstops, startcodon_model, glength)
 
-    @info "found $(length(fhmms) + length(rhmms)) protein-coding genes"
-
-    gffs = writeGFF(outfile, id, genome, rev_genome, append!(fhmms,rhmms), trn_matches, rrns)
-    #drawgenome(svgfile, id, glength, gffs)
-end
-
-if abspath(PROGRAM_FILE) == @__FILE__ #running as script
-    if isdir(ARGS[1]) && isdir(ARGS[2])
-        fafiles = filter!(x->endswith(x,".fa") || endswith(x,".fasta"), readdir(ARGS[1], join=true))
-        for fasta in fafiles
-            accession = first(split(basename(fasta),"."))
-            main(fasta, joinpath(ARGS[2], accession * ".gff"))
-        end
-    elseif length(ARGS) == 2
-        main(ARGS[1], ARGS[2])
-    elseif length(ARGS) == 3
-        if startswith(ARGS[3], "svgfile")
-            main(ARGS[1], ARGS[2]; svgfile=last(split(ARGS[3], "=")))
-        elseif startswith(ARGS[3], "loglevel")
-            main(ARGS[1], ARGS[2]; loglevel=last(split(ARGS[3], "=")))
-        end
-    elseif length(ARGS) == 4
-        svgfile::String
-        loglevel::String
-        if startswith(ARGS[3], "svgfile")
-            svgfile=last(split(ARGS[3], "="))
-        elseif startswith(ARGS[3], "loglevel")
-            loglevel=last(split(ARGS[3], "="))
-        end
-        if startswith(ARGS[4], "svgfile")
-            svgfile=last(split(ARGS[4], "="))
-        elseif startswith(ARGS[4], "loglevel")
-            loglevel=last(split(ARGS[4], "="))
+    cds_matches = append!(fhmms,rhmms)
+    frameshift_merge!(cds_matches, glength, genome)
+    @info "found $(length(cds_matches)) protein-coding genes"
+    gffs = getGFF(genome, rev_genome, cds_matches, trn_matches, rrns, glength)
+    if outfile_fa != nothing
+        gffs, shifted_genome = trnF_start(gffs, genome, glength)
+        open(FASTA.Writer, outfile_fa) do w
+            write(w, FASTA.Record(id, shifted_genome))
         end
     end
+    CDSless = filter(x->x.ftype != "CDS", gffs)
+    mRNAless = filter(x->x.ftype != "mRNA", CDSless)
+    if outfile_gff != nothing
+        writeGFF(id, gffs, outfile_gff)
+    else 
+        for gff in gffs
+            println(join([id, gff.source, gff.ftype,gff.fstart,gff.fend,gff.score,gff.strand,gff.phase,gff.attributes], "\t"))
+        end
+    end
+    if outfile_gb != nothing
+        writeGB(id, gffs, outfile_gb, glength)
+    end
+
+    svgfile = "test.svg"
+    drawgenome(svgfile, id, glength, mRNAless)
 end
+
+
+
+
+
+args = @dictarguments begin
+    @helpusage "Emma.jl [options] <FASTA_file>"
+    @helpdescription """
+        Note: Use consistant inputs/outputs. If you wish
+        to annotate a directory of fasta files, ensure that
+        the output parameters are also directories.
+        """
+    @argumentoptional String GFF_out "--gff" 
+    @arghelp "file/dir for gff output"
+    @argumentoptional String GB_out "--gb"
+    @arghelp "file/dir for gb output"
+    @argumentoptional String FA_out "--fa"
+    @arghelp "file/dir for fasta output. Use this argument if you wish annotations to begin with tRNA-Phe"
+    @positionalrequired String FASTA_file
+    @arghelp "file/dir for fasta input"
+end
+println(ARGS)
+filtered_args = filter(pair -> pair.second != nothing, args)
+all_dirs = all(isdir, values(filtered_args))
+all_files = !any(isdir, values(filtered_args))
+if all_dirs
+    fafiles = filter!(x->endswith(x,".fa") || endswith(x,".fasta"), readdir(args[:FASTA_file], join=true))
+    for fasta in fafiles
+        accession = first(split(basename(fasta),"."))
+        outfile_gff = haskey(filtered_args, :GFF_out) ? joinpath(args[:GFF_out], accession * ".gff") : nothing
+        outfile_gb = haskey(filtered_args, :GB_out) ? joinpath(args[:GB_out], accession * ".gb") : nothing
+        outfile_fa = haskey(filtered_args, :FA_out) ? joinpath(args[:FA_out], accession * ".fa") : nothing
+        main(fasta, outfile_gff=outfile_gff, outfile_gb=outfile_gb, outfile_fa=outfile_fa)
+    end
+elseif all_files
+    main(args[:FASTA_file], outfile_gff = args[:GFF_out], outfile_gb = args[:GB_out], outfile_fa = args[:FA_out])
+else
+    throw("Inputs must be consistant; all directories or all files")
+end
+
+
 
 #ARGS[1] = fasta input
 #ARGS[2] = gff output

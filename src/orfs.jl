@@ -2,11 +2,24 @@
 const startcodon = biore"(ATT)|(ATC)|(ATA)|(ATG)|(GTG)|(TTG)"d
 const stopcodon = biore"(TAG)|(TAA)|(AGA)|(AGG)"d
 
+
+lengths = Dict{String, Int64}()
+open(joinpath(emmamodels, "CDS_median_lengths.txt"), "r") do infile
+    for line in readlines(infile)
+        names = split(line, "\t")
+        lengths[first(names)] = parse(Int64, last(names))
+    end
+end
+
+#Dictionary constant of median lengths
+const cdslengths = lengths
+
 Codon = LongSubSeq{DNAAlphabet{4}}
 
 function codonmatches(seq::CircularSequence, pattern)::Vector{Vector{Int32}}
     frames = [Int32[] for f in 1:3]
     for m in eachmatch(pattern, seq.sequence[1:seq.length+2])
+        n_certain(matched(m)) < 3 && continue
         i::Int32 = m.captured[1]
         push!(frames[mod1(i, 3)], i)
     end
@@ -17,6 +30,7 @@ function getcodons(seq::CircularSequence, pattern)
     positions = [Int32[] for f in 1:3]
     codons = Dict{Int32, Codon}()
     for m in eachmatch(pattern, seq.sequence[1:seq.length+2])
+        n_certain(matched(m)) < 3 && continue
         i::Int32 = m.captured[1]
         push!(positions[mod1(i, 3)], i)
         codons[i] = matched(m)
@@ -124,7 +138,7 @@ LongSequence{DNAAlphabet{4}}("GTG") => 0.04468146133661947, LongSequence{DNAAlph
 function fix_start_and_stop_codons!(hmm_matches, trns, starts, startcodons, stops, startcodon_model, glength)
 
     function is_possible_start(start, model_start, leftwindow, rightwindow, glength)
-        d = circulardistance(start, model_start, glength)
+        d = closestdistance(start, model_start, glength) 
         #must be in frame
         mod(d, 3) ≠ 0 && return false
         if d > glength/2; d -= glength; end
@@ -152,6 +166,7 @@ function fix_start_and_stop_codons!(hmm_matches, trns, starts, startcodons, stop
         upstream_stop = inframe_stops[mod1(stop_idx-1, length(inframe_stops))]
         distance_to_upstream_stop = circulardistance(upstream_stop, hmmstart, glength)
         @debug "$hmmstart, $distance_to_upstream_stop"
+        #println(starts)
         possible_starts = Int32[]
         for s in starts
             append!(possible_starts, filter(x->is_possible_start(x, hmmstart, distance_to_upstream_stop, 50, glength), s))
@@ -163,14 +178,12 @@ function fix_start_and_stop_codons!(hmm_matches, trns, starts, startcodons, stop
         @debug possible_starts
         #Finds distance to upstream tRNA
         upstream_trn_end = upstream_tRNA.fm.target_from + upstream_tRNA.fm.target_length - 1
-        dist_to_upstream_trn = circulardistance(upstream_trn_end, hmmstart, glength)
-        if dist_to_upstream_trn > glength/2; dist_to_upstream_trn -= glength; end
+        dist_to_upstream_trn = closestdistance(upstream_trn_end, hmmstart, glength)
         @debug "dist to upstream tRNA: $dist_to_upstream_trn"
         #If distance is < 50, pick first inframe start of transcript
-        if dist_to_upstream_trn < 25
+        if dist_to_upstream_trn < 10
             for (i,ps) in enumerate(possible_starts)
-                relative_to_upstream_trn = circulardistance(upstream_trn_end, ps, glength)
-                if relative_to_upstream_trn > glength/2; relative_to_upstream_trn -= glength; end
+                relative_to_upstream_trn = closestdistance(upstream_trn_end, ps, glength)
                 if relative_to_upstream_trn < 0
                     filter!(x -> x != ps, possible_starts)
                 end
@@ -183,20 +196,16 @@ function fix_start_and_stop_codons!(hmm_matches, trns, starts, startcodons, stop
             for (i,ps) in enumerate(possible_starts)
                 #calculate model inputs :target_encoding, :relative_to_hmm, :phase_to_hmm,:relative_to_upstream_tRNA, :relative_to_upstream_CDS, :relative_to_upstream_stop
                 model_inputs[i, 1] = get(target_encoding, startcodons[ps], 0)
-                relative_to_hmm = circulardistance(hmmstart, ps, glength)
-                if relative_to_hmm > glength/2; relative_to_hmm -= glength; end
+                relative_to_hmm = closestdistance(hmmstart, ps, glength)
                 model_inputs[i, 2] = relative_to_hmm
                 model_inputs[i, 3] = mod(relative_to_hmm, 3)
                 upstream_trn_end = upstream_tRNA.fm.target_from + upstream_tRNA.fm.target_length - 1
-                relative_to_upstream_trn = circulardistance(upstream_trn_end, ps, glength)
-                if relative_to_upstream_trn > glength/2; relative_to_upstream_trn -= glength; end
+                relative_to_upstream_trn = closestdistance(upstream_trn_end, ps, glength)
                 model_inputs[i, 4] = relative_to_upstream_trn
                 upstream_cds_end = upstream_cds.target_from + upstream_cds.target_length - 1
-                relative_to_upstream_cds = circulardistance(upstream_cds_end, ps, glength)
-                if relative_to_upstream_cds > glength/2; relative_to_upstream_cds -= glength; end
+                relative_to_upstream_cds = closestdistance(upstream_cds_end, ps, glength)
                 model_inputs[i, 5] = relative_to_upstream_cds
-                relative_to_upstream_stop = circulardistance(upstream_stop, ps, glength)
-                if relative_to_upstream_stop > glength/2; relative_to_upstream_stop -= glength; end
+                relative_to_upstream_stop = closestdistance(upstream_stop, ps, glength)
                 model_inputs[i, 6] = relative_to_upstream_stop
                 @debug(model_inputs[i,:])
             end
@@ -211,6 +220,10 @@ function fix_start_and_stop_codons!(hmm_matches, trns, starts, startcodons, stop
         #pick first stop, or if none before tRNA, see if can construct stop by polyadenylation
         stop_idx = searchsortedfirst(stops[mod1(beststart, 3)], beststart) #index of first in-frame stop following best start codon
         next_stop = stops[mod1(beststart, 3)][mod1(stop_idx, length(stops[mod1(beststart, 3)]))]
+        if closestdistance(beststart, next_stop, glength) > 2 * cdslengths[hmm_match.query]
+            @warn "$(hmm_match.query) incomplete at the 3' boundary"
+            next_stop = hmm_match.target_from + hmm_match.target_length - 1
+        end
         @debug "first stop: $next_stop"
         #modify HMM match
         cds =  FeatureMatch(hmm_match.id, hmm_match.query, hmm_match.strand, 

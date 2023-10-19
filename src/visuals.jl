@@ -22,8 +22,8 @@ function drawfeature(feature::GFF, glength::Integer)
         inside = fradius - 4
         move(polar(outside, pos2radians(start)))
         arc(gcentre, outside, pos2radians(start), pos2radians(stop-min(arrowdepth,flength)))
-        line(polar(fradius, pos2radians(stop)))
-        line(polar(inside, pos2radians(stop-min(arrowdepth,flength))))
+        Luxor.line(polar(fradius, pos2radians(stop)))
+        Luxor.line(polar(inside, pos2radians(stop-min(arrowdepth,flength))))
         carc(gcentre, inside, pos2radians(stop-min(arrowdepth,flength)), pos2radians(start))
     else
         frame=mod(reverse_complement(stop, glength),3)
@@ -32,8 +32,8 @@ function drawfeature(feature::GFF, glength::Integer)
         inside = fradius + 4
         move(polar(outside, pos2radians(stop)))
         carc(gcentre, outside, pos2radians(stop), pos2radians(start+min(arrowdepth,flength)))
-        line(polar(fradius, pos2radians(start)))
-        line(polar(inside, pos2radians(start+min(arrowdepth,flength))))
+        Luxor.line(polar(fradius, pos2radians(start)))
+        Luxor.line(polar(inside, pos2radians(start+min(arrowdepth,flength))))
         arc(gcentre, inside, pos2radians(start+min(arrowdepth,flength)), pos2radians(stop))
     end
     closepath()
@@ -60,8 +60,8 @@ function drawfeature(feature::GFF, glength::Integer)
     if (prot_name == "rrnL")
         (prot_name="16S rRNA")
     end
-    text(prot_name, Point((fradius+20)*cos(location), (fradius+20)sin(location)), angle=location)
-    line(Point((fradius+5)*cos(location), (fradius+5)*sin(location)), Point((fradius+18)*cos(location), (fradius+18)sin(location)), :stroke)
+    Luxor.text(prot_name, Point((fradius+20)*cos(location), (fradius+20)sin(location)), angle=location)
+    Luxor.line(Point((fradius+5)*cos(location), (fradius+5)*sin(location)), Point((fradius+18)*cos(location), (fradius+18)sin(location)), :stroke)
 end
 
 function drawgenome(svgfile::String, id::AbstractString, glength::Integer, gffs::Vector{GFF})
@@ -70,12 +70,12 @@ function drawgenome(svgfile::String, id::AbstractString, glength::Integer, gffs:
     background("white")
     setline(0.5)
     setcolor("black")
-    circle(gcentre, gradius, action = :stroke)
+    Luxor.circle(gcentre, gradius, action = :stroke)
     fontsize(12)
     fontface("Helvetica")
-    text(id, Point(0, -20), halign=:center, valign=:center)
-    text(string(glength) * " bp", halign=:center, valign=:center)
-    text("Annotated by Emma", Point(0, 20), halign=:center, valign=:center)
+    Luxor.text(id, Point(0, -20), halign=:center, valign=:center)
+    Luxor.text(string(glength) * " bp", halign=:center, valign=:center)
+    Luxor.text("Annotated by Emma", Point(0, 20), halign=:center, valign=:center)
     fontface("Helvetica Oblique")
     for gff in gffs
         drawfeature(gff, glength)
@@ -91,13 +91,13 @@ function drawgenome(svgfile::String, id::AbstractString, glength::Integer, gffs:
             decorate = () -> begin
                     d = counter()
                     if d % 1000 == 0
-                        text(string(d), O + (0, -20), halign=:center)
+                        Luxor.text(string(d), O + (0, -20), halign=:center)
                         setline(0.6)
-                        line(O - (0, 10), O + (0, 0), action = :stroke)
+                        Luxor.line(O - (0, 10), O + (0, 0), action = :stroke)
                     end
                     if d % 200 == 0
                         setline(0.4)
-                        line(O - (0, 3), O + (0, 0), action = :stroke)
+                        Luxor.line(O - (0, 3), O + (0, 0), action = :stroke)
                     end
                  end
             )

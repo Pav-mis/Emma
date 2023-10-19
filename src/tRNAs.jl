@@ -5,8 +5,8 @@ struct tRNA
 end
 
 const anticodon2trn = Dict("UGC"=>"trnA","GCA"=>"trnC","GUC"=>"trnD","UUC"=>"trnE","GAA"=>"trnF","UCC"=>"trnG",
-    "GUG"=>"trnH","GAU"=>"trnI","UUU"=>"trnK","UAA"=>"trnL","UAG"=>"trnL","CAU"=>"trnM","GUU"=>"trnN",
-    "UGG"=>"trnP","UUG"=>"trnQ","UCG"=>"trnR","GCU"=>"trnS","UGA"=>"trnS","UGU"=>"trnT","UAC"=>"trnV",
+    "GUG"=>"trnH","GAU"=>"trnI","UUU"=>"trnK","UAA"=>"trnL2","UAG"=>"trnL1","CAU"=>"trnM","GUU"=>"trnN",
+    "UGG"=>"trnP","UUG"=>"trnQ","UCG"=>"trnR","GCU"=>"trnS1","UGA"=>"trnS2","UGU"=>"trnT","UAC"=>"trnV",
     "UCA"=>"trnW","GUA"=>"trnY")
 
 #generic vertebrate models
@@ -32,6 +32,8 @@ const model2anticodonpos = deserialize(joinpath(emmamodels, "trn", "model2antico
 
 const trn2model = Dict(value => key for (key, value) in model2trn)
 
+const trn2anticodon = Dict(value => key for (key, value) in anticodon2trn)
+
 function get_best_trns(alltrns::Vector{tRNA}, glength::Integer)
     besttrns = tRNA[]
     isempty(alltrns) && return besttrns
@@ -54,17 +56,27 @@ function get_best_trns(alltrns::Vector{tRNA}, glength::Integer)
     return besttrns
 end
 
-function anticodon(qfrom::Int, qseq::AbstractString, tseq::AbstractString, pos::Int)
+function anticodon(qfrom::Int, qseq::AbstractString, tseq::AbstractString, pos::Int, expected::String)
     @assert length(qseq) == length(tseq)
     pos < qfrom && return missing
     pointer = qfrom - 1
+    trunc = false
     for (i,c) in enumerate(qseq)
         c == '.' && continue
         c == '*' && continue
+        c == ' ' && continue
         isdigit(c) && continue
-        c == ']' && continue
-        if c == '['
+        if c == ']'
+            trunc = false
+            continue
+        end
+        if trunc == true
+            continue
+        elseif c == '[' 
             pointer += parse(Int, qseq[i+1:(findnext("]",qseq,i+2)[1]-1)])
+        elseif c == '<'
+            trunc = true
+            continue
         else
             pointer += 1
         end
@@ -105,8 +117,11 @@ function parse_trn_alignments(file::String, glength::Integer)
             #find anticodon position
             qfrom = parse(Int, bits[7])
             trn = model2trn[query]
-            anticod = anticodon(qfrom, qseq, tseq, model2anticodonpos[query])
+            expected = trn2anticodon[trn]
+            anticod = anticodon(qfrom, qseq, tseq, model2anticodonpos[query], expected)
             if haskey(anticodon2trn, anticod) == true
+                push!(trns, tRNA(FeatureMatch(target, anticodon2trn[anticod], tstrand, qfrom, parse(Int, bits[8]), target_from, tto - target_from + 1, parse(Float64, bits[3])),anticod, false))
+            else 
                 push!(trns, tRNA(FeatureMatch(target, trn, tstrand, qfrom, parse(Int, bits[8]), target_from, tto - target_from + 1, parse(Float64, bits[3])),anticod, false))
             end
         end
@@ -147,4 +162,3 @@ function get_overlapped_trns(trns::Vector{tRNA}, glength::Integer)
     end
     return overlapped
 end
-    

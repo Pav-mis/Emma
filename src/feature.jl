@@ -33,10 +33,27 @@ function merge_matches(m1::FeatureMatch, m2::FeatureMatch, glength::Integer)
         max(m1.target_length, circulardistance(m1.target_from, m2.target_from + m2.target_length, glength)), min(m1.evalue, m2.evalue))
 end
 
+function get_ND3s(merged::FeatureMatch, glength::Integer, position::Integer)
+    gene1 = FeatureMatch(merged.id, merged.query, merged.strand, merged.model_from, merged.model_from + position-2, merged.target_from,
+    circulardistance(merged.target_from, merged.target_from + position-2, glength), merged.evalue)
+    gene2 = FeatureMatch(merged.id, merged.query, merged.strand, merged.model_from + position + 2, merged.model_to, merged.target_from + position + 2,
+    circulardistance(merged.target_from + position+2, merged.target_from + merged.target_length, glength), merged.evalue)
+    return (gene1, gene2)
+end
+
+function five2three(x, y, glength)
+    circulardistance(y, x, glength) > circulardistance(x, y, glength)
+end
+
 # merge adjacent matches to same model
 function rationalise_matches!(matches::Vector{FeatureMatch}, glength::Integer)
+    #println(matches)
     length(matches) < 2 && return matches
     for i in matches, j in matches
+        ij = [i,j]
+        sort!(ij, lt=(x,y)->five2three(x,y,glength))
+        i = first(ij)
+        j = last(ij)
         i == j && continue
         i.strand ≠ j.strand && continue
         # if not same gene and substantially overlap, only keep the best one
@@ -52,16 +69,73 @@ function rationalise_matches!(matches::Vector{FeatureMatch}, glength::Integer)
         end
         modeldistance = j.model_from - i.model_to
         modellength = max(i.model_to, j.model_to) - min(i.model_from, j.model_from)
-        matchdistance = circulardistance(i.target_from + i.target_length - 1, j.target_from, glength)
+        matchdistance = abs(closestdistance(i.target_from + i.target_length - 1, j.target_from, glength))
         tolerance = 0.1
-        if circularin(j.target_from, i, glength) || (matchdistance - modeldistance)^2 < tolerance * modellength^2 # arbitrary tolerance
-            merged_match = merge_matches(i, j, glength)
-            deleteat!(matches, findfirst(x->x==i,matches))
-            deleteat!(matches, findfirst(x->x==j,matches))
-            push!(matches, merged_match)
-            return(rationalise_matches!(matches, glength))
+        if mod(i.target_from, 3) == mod(j.target_from, 3) || i.query == "16srna" || i.query == "12srna"
+            if circularin(j.target_from, i, glength) || (matchdistance - modeldistance)^2 < tolerance * modellength^2 # arbitrary tolerance
+                merged_match = merge_matches(i, j, glength)
+                deleteat!(matches, findfirst(x->x==i,matches))
+                deleteat!(matches, findfirst(x->x==j,matches))
+                push!(matches, merged_match)
+                return(rationalise_matches!(matches, glength))
+            end
         end
     end
     matches
 end
 
+function group_duplicates(matches::Vector{FeatureMatch})
+    query_dict = Dict{String, Vector{FeatureMatch}}()
+    for item in matches
+        query_value = item.query
+        if haskey(query_dict, query_value)
+            push!(query_dict[query_value], item)
+        else
+            query_dict[query_value] = [item]
+        end
+    end
+    return query_dict
+end
+
+function frameshift_merge!(matches::Vector{FeatureMatch}, glength::Integer, genome::CircularSequence)
+    #first identify duplicate cds features
+    query_dict = group_duplicates(matches)
+    for (key, vector) in query_dict
+        if length(vector) > 1
+            #Pairs duplicates for checks
+            for i in vector, j in vector
+                i == j && continue
+                i.strand ≠ j.strand && continue
+                ij = [i,j]
+                #Ensures pairs are ordered 5' - 3'
+                sort!(ij, lt=(x,y)->five2three(x,y,glength))
+                i = first(ij)
+                j = last(ij)
+                modeldistance = j.model_from - i.model_to
+                modellength = max(i.model_to, j.model_to) - min(i.model_from, j.model_from)
+                matchdistance = abs(closestdistance(i.target_from + i.target_length - 1, j.target_from, glength))
+                tolerance = 0.1
+                if circularin(j.target_from, i, glength) || (matchdistance - modeldistance)^2 < tolerance * modellength^2 # arbitrary tolerance
+                    merged_match = merge_matches(i, j, glength)
+                    merge_start = merged_match.target_from
+                    merge_end = merged_match.target_from + merged_match.target_length - 1
+                    #Check merged hit for conserved frameshift sequence
+                    merged_seq = i.strand == '+' ? genome.sequence[merge_start:merge_end] : reverse_complement(genome).sequence[merge_start:merge_end]
+                    sequence_match = match(r".TT.CT.AGTAGC", String(merged_seq))
+                    if sequence_match != nothing
+                        position = sequence_match.offset+5
+                        gene1, gene2 = get_ND3s(merged_match, glength, position)
+                        deleteat!(matches, findfirst(x->x==i,matches))
+                        deleteat!(matches, findfirst(x->x==j,matches))
+                        filter!(x -> x != i, vector)
+                        filter!(x -> x != j, vector)
+                        @warn "frameshift detected at nt $position for $(i.query)"
+                        push!(matches, merged_match)
+                        push!(matches, gene1)
+                        push!(matches, gene2)
+                    end
+                end
+            end
+        end
+    end
+end

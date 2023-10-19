@@ -62,6 +62,12 @@ function parse_tbl(file::String, glength::Integer)
     rationalise_matches!(matches, glength)
 end
 
+function find_closest_downstream_trn(target, trns, glength)
+    idx = argmin(abs.([closestdistance(target, trn.fm.target_from+trn.fm.target_length, glength) for trn in trns]))
+    closest_trn = trns[idx]
+    return closest_trn
+end
+
 function fix_rrn_ends!(rRNAs, ftrns, rtrns, glength)
     for rrn in rRNAs
         trns = rrn.strand == '+' ? ftrns : rtrns
@@ -72,17 +78,18 @@ function fix_rrn_ends!(rRNAs, ftrns, rtrns, glength)
         trnidx = searchsortedfirst(trns, rrnstart, lt=(t,x)->t.fm.target_from < x)
         upstream_tRNA = trns[mod1(trnidx-1, length(trns))]
         @debug upstream_tRNA
-        clockwise_dist = circulardistance(upstream_tRNA.fm.target_from + upstream_tRNA.fm.target_length + 50, rrnstart, glength)
-        anticlockwise_dist = circulardistance(rrnstart, upstream_tRNA.fm.target_from + upstream_tRNA.fm.target_length + 50, glength)
+        clockwise_dist = circulardistance(upstream_tRNA.fm.target_from + upstream_tRNA.fm.target_length, rrnstart, glength)
+        anticlockwise_dist = circulardistance(rrnstart, upstream_tRNA.fm.target_from + upstream_tRNA.fm.target_length, glength)
         if clockwise_dist < 50 || anticlockwise_dist < rrnstart + rrn.target_length #overlap, or near enough to assume contiguity
             rrnstart = upstream_tRNA.fm.target_from + upstream_tRNA.fm.target_length
             changed = true
         end
         @debug "$rrnstart $rrnstop $changed"
         trnidx = searchsortedfirst(trns, rrnstop, lt=(t,x)->t.fm.target_from+t.fm.target_length < x)
-        downstream_tRNA = trns[mod1(trnidx, length(trns))]
+        #downstream_tRNA = trns[mod1(trnidx, length(trns))]
+        downstream_tRNA = find_closest_downstream_trn(rrnstop, trns, glength)
         @debug downstream_tRNA
-        if downstream_tRNA.fm.target_from - 50 < rrnstop #overlap, or near enough to assume contiguity
+        if abs(closestdistance(downstream_tRNA.fm.target_from, rrnstop, glength)) < 50 #overlap, or near enough to assume contiguity
             rrnstop = downstream_tRNA.fm.target_from - 1
             changed = true
         end

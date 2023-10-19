@@ -33,6 +33,11 @@ function circulardistance(x::Integer, y::Integer, c::Integer)
     return y >= x ? y - x : c + y - x
 end
 
+function closestdistance(x::Integer, y::Integer, c::Integer)
+    clockwisedistance = circulardistance(x, y, c)
+    return clockwisedistance < c/2 ? clockwisedistance : clockwisedistance - c
+end
+
 function circularin(x::Integer, start::Integer, length::Integer, c::Integer)
     mod1(x, c) ∈ range(mod1(start, c), length=length) && return true
     false
@@ -97,3 +102,4 @@ end
 @inline function getcodon(cs::CircularSequence, index::Integer)
     return (cs[index], cs[index+Int32(1)], cs[index+Int32(2)])
 end
+

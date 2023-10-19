@@ -69,4 +69,3 @@ function drawgenome(svgfile::String, id::AbstractString, glength::Integer, gffs:
     end
     finish()
 end
-
